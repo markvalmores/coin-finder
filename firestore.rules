@@ -20,8 +20,9 @@ service cloud.firestore {
       return resource.data;
     }
 
-    function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+    // Supports both Google Auth sessions and Parlor Guest IDs on external Vercel domains
+    function isValidActorId(actorId) {
+      return isValidId(actorId) && (request.auth == null || actorId == request.auth.uid);
     }
 
     // 3. Entity Validation Blueprints (Anti-Update-Gap)
@@ -30,8 +31,7 @@ service cloud.firestore {
         && data.keys().hasOnly(['slotId', 'activeMatchId', 'updatedBy', 'updatedAt'])
         && data.slotId is string && data.slotId.size() >= 1 && data.slotId.size() <= 32 && data.slotId.matches('^[a-zA-Z0-9_\\-]+$')
         && data.activeMatchId is string && data.activeMatchId.size() >= 1 && data.activeMatchId.size() <= 64 && data.activeMatchId.matches('^[a-zA-Z0-9_\\-]+$')
-        && data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 && data.updatedBy.matches('^[a-zA-Z0-9_\\-]+$')
-        && data.updatedBy == request.auth.uid
+        && isValidActorId(data.updatedBy)
         && data.updatedAt is timestamp && data.updatedAt == request.time;
     }
 
@@ -76,14 +76,14 @@ service cloud.firestore {
     function isValidSeatChange() {
       return (
         incoming().player1Id == existing().player1Id
-        || (existing().player1Id == '' && incoming().player1Id == request.auth.uid)
-        || (existing().player1Id == request.auth.uid && incoming().player1Id == '')
+        || (existing().player1Id == '' && isValidActorId(incoming().player1Id))
+        || (isValidActorId(existing().player1Id) && incoming().player1Id == '')
       ) && (
         incoming().player2Id == existing().player2Id
-        || (existing().player2Id == '' && incoming().player2Id == request.auth.uid)
-        || (existing().player2Id == request.auth.uid && incoming().player2Id == '')
+        || (existing().player2Id == '' && isValidActorId(incoming().player2Id))
+        || (isValidActorId(existing().player2Id) && incoming().player2Id == '')
       ) && (
-        !(incoming().player1Id == request.auth.uid && incoming().player2Id == request.auth.uid)
+        incoming().player1Id == '' || incoming().player1Id != incoming().player2Id
       );
     }
 
@@ -97,7 +97,6 @@ service cloud.firestore {
     function isStartMatchAction() {
       return existing().status == 'waiting'
         && incoming().status == 'playing'
-        && (request.auth.uid == existing().player1Id || request.auth.uid == existing().player2Id)
         && existing().player1Id != ''
         && existing().player2Id != ''
         && incoming().roundPhase == 'HIDING'
@@ -109,10 +108,6 @@ service cloud.firestore {
         && incoming().status == 'playing'
         && existing().roundPhase == 'HIDING'
         && incoming().roundPhase == 'GUESSING'
-        && (
-          (existing().hiderSlot == 1 && request.auth.uid == existing().player1Id)
-          || (existing().hiderSlot == 2 && request.auth.uid == existing().player2Id)
-        )
         && incoming().coinHat >= 0 && incoming().coinHat <= 2
         && incoming().diff(existing()).affectedKeys().hasOnly(['coinHat', 'roundPhase', 'updatedAt']);
     }
@@ -122,10 +117,6 @@ service cloud.firestore {
         && (incoming().status == 'playing' || incoming().status == 'finished')
         && existing().roundPhase == 'GUESSING'
         && (incoming().roundPhase == 'REVEAL' || incoming().roundPhase == 'MATCH_OVER')
-        && (
-          (existing().hiderSlot == 1 && request.auth.uid == existing().player2Id)
-          || (existing().hiderSlot == 2 && request.auth.uid == existing().player1Id)
-        )
         && incoming().guessedHat >= 0 && incoming().guessedHat <= 2
         && (incoming().score1 + incoming().score2) == (existing().score1 + existing().score2 + 1)
         && (incoming().status != 'finished' || incoming().score1 == 5 || incoming().score2 == 5)
@@ -139,7 +130,6 @@ service cloud.firestore {
         && incoming().status == 'playing'
         && existing().roundPhase == 'REVEAL'
         && incoming().roundPhase == 'HIDING'
-        && (request.auth.uid == existing().player1Id || request.auth.uid == existing().player2Id)
         && incoming().roundNumber == existing().roundNumber + 1
         && incoming().hiderSlot != existing().hiderSlot
         && incoming().coinHat == -1
@@ -151,18 +141,16 @@ service cloud.firestore {
 
     // 5. Public Lobby Slot Pointers (/lobbySlots/{slotId})
     match /lobbySlots/{slotId} {
-      allow get: if isSignedIn() && isValidId(slotId);
+      allow get: if isValidId(slotId);
       allow list: if false;
 
-      allow create: if isSignedIn()
-        && isValidId(slotId)
+      allow create: if isValidId(slotId)
         && isValidLobbySlot(incoming())
         && incoming().slotId == slotId
         && (slotId == 'slot-1' || slotId == 'slot-2' || slotId == 'slot-3' || slotId == 'slot-4')
         && exists(/databases/$(database)/documents/matches/$(incoming().activeMatchId));
 
-      allow update: if isSignedIn()
-        && isValidId(slotId)
+      allow update: if isValidId(slotId)
         && isValidLobbySlot(incoming())
         && incoming().slotId == existing().slotId
         && incoming().diff(existing()).affectedKeys().hasOnly(['activeMatchId', 'updatedBy', 'updatedAt'])
@@ -173,14 +161,13 @@ service cloud.firestore {
 
     // 6. Real-Time Match Documents (/matches/{matchId})
     match /matches/{matchId} {
-      allow get: if isSignedIn() && isValidId(matchId);
+      allow get: if isValidId(matchId);
       allow list: if false;
 
-      allow create: if isSignedIn()
-        && isValidId(matchId)
+      allow create: if isValidId(matchId)
         && isValidMatch(incoming())
         && incoming().matchId == matchId
-        && incoming().hostId == request.auth.uid
+        && isValidActorId(incoming().hostId)
         && incoming().status == 'waiting'
         && incoming().score1 == 0
         && incoming().score2 == 0
@@ -193,13 +180,12 @@ service cloud.firestore {
         && incoming().winnerSlot == 0
         && incoming().createdAt == request.time
         && (
-          (incoming().player1Id == request.auth.uid && incoming().player2Id == '')
-          || (incoming().player1Id == '' && incoming().player2Id == request.auth.uid)
+          (incoming().player1Id == incoming().hostId && incoming().player2Id == '')
+          || (incoming().player1Id == '' && incoming().player2Id == incoming().hostId)
           || (incoming().player1Id == '' && incoming().player2Id == '')
         );
 
-      allow update: if isSignedIn()
-        && isValidId(matchId)
+      allow update: if isValidId(matchId)
         && isValidMatch(incoming())
         && existing().status != 'finished'
         && incoming().matchId == existing().matchId

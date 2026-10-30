@@ -1,8 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  onAuthStateChanged,
-  User,
-} from 'firebase/auth';
+import { onAuthStateChanged } from 'firebase/auth';
 import {
   doc,
   getDoc,
@@ -32,6 +29,9 @@ import {
   handleFirestoreError,
   sanitizePlayerName,
   sanitizeMatchId,
+  getOrCreateLocalPlayerIdentity,
+  saveLocalPlayerName,
+  PlayerIdentity,
   signInWithGoogle,
   logOutUser,
 } from './firebase';
@@ -83,9 +83,13 @@ export default function App() {
   const [view, setView] = useState<AppView>('LOBBY');
   const [gameMode, setGameMode] = useState<GameMode>('ONLINE_FIREBASE');
 
-  // Firebase Auth & Matchmaking State
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  // Player Identity (Supports both Google Auth and instant Parlor Player Pass on Vercel)
+  const [playerIdentity, setPlayerIdentity] = useState<PlayerIdentity>(() =>
+    getOrCreateLocalPlayerIdentity()
+  );
+  const [unauthorizedDomainHost, setUnauthorizedDomainHost] = useState<string | null>(null);
+
+  // Firebase Matchmaking State
   const [selectedSlotId, setSelectedSlotId] = useState<string>('slot-1');
   const [slotPointers, setSlotPointers] = useState<Record<string, string>>({});
   const [slotMatches, setSlotMatches] = useState<Record<string, OnlineMatchDoc>>({});
@@ -95,7 +99,10 @@ export default function App() {
   const [lobbyError, setLobbyError] = useState<string | null>(null);
 
   // Local / Solo Game State (for 1 Player Only vs Bot and Local 2-Player Pass & Play)
-  const [playerNames, setPlayerNames] = useState<[string, string]>(['Player 1', 'Parlor Bot']);
+  const [playerNames, setPlayerNames] = useState<[string, string]>(() => [
+    getOrCreateLocalPlayerIdentity().displayName,
+    'Parlor Bot',
+  ]);
   const [editingNames, setEditingNames] = useState(false);
   const [scores, setScores] = useState<[number, number]>([0, 0]);
   const [roundNumber, setRoundNumber] = useState<number>(1);
@@ -135,23 +142,75 @@ export default function App() {
     return id;
   }, []);
 
-  // 1. Firebase Auth Listener
+  // 1. Sync Firebase Auth state if user signs in with Google, otherwise use persistent Parlor Player Pass
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-      setAuthLoading(false);
+      if (user) {
+        setPlayerIdentity({
+          uid: user.uid,
+          displayName: sanitizePlayerName(
+            user.displayName || user.email?.split('@')[0],
+            'Player'
+          ),
+          email: user.email,
+          isGoogleAuth: true,
+        });
+      } else {
+        setPlayerIdentity(getOrCreateLocalPlayerIdentity());
+      }
     });
     return () => unsub();
   }, []);
 
-  // 2. Listen to the 4 Public Lobby Slot Pointers (/lobbySlots/slot-1 .. slot-4) when authenticated
-  useEffect(() => {
-    if (authLoading || !currentUser) {
-      setSlotPointers({});
-      setSlotMatches({});
-      return;
-    }
+  // Allow player to edit their display name in the Lobby
+  const handleUpdatePlayerName = async (newName: string) => {
+    const clean = saveLocalPlayerName(newName);
+    setPlayerIdentity((prev) => ({ ...prev, displayName: clean }));
+    setPlayerNames((prev) => [clean, prev[1]]);
 
+    // If currently seated in a waiting lobby, update our seat nickname in Firestore too
+    if (onlineMatch && onlineMatch.status === 'waiting') {
+      const isP1 = onlineMatch.player1Id === playerIdentity.uid;
+      const isP2 = onlineMatch.player2Id === playerIdentity.uid;
+      if (isP1 || isP2) {
+        const matchPath = `matches/${onlineMatch.matchId}`;
+        try {
+          await updateDoc(doc(db, 'matches', onlineMatch.matchId), {
+            player1Id: onlineMatch.player1Id,
+            player1Name: isP1 ? clean : onlineMatch.player1Name,
+            player2Id: onlineMatch.player2Id,
+            player2Name: isP2 ? clean : onlineMatch.player2Name,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, matchPath);
+        }
+      }
+    }
+  };
+
+  // Optional Google Sign-In handler that catches auth/unauthorized-domain cleanly on Vercel
+  const handleGoogleSignIn = async () => {
+    setLobbyError(null);
+    try {
+      await signInWithGoogle();
+      setUnauthorizedDomainHost(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('auth/unauthorized-domain')) {
+        const host =
+          typeof window !== 'undefined' && window.location?.hostname
+            ? window.location.hostname
+            : 'your-vercel-app.vercel.app';
+        setUnauthorizedDomainHost(host);
+      } else if (!msg.includes('auth/popup-closed-by-user')) {
+        setLobbyError(msg);
+      }
+    }
+  };
+
+  // 2. Listen to the 4 Public Lobby Slot Pointers (/lobbySlots/slot-1 .. slot-4)
+  useEffect(() => {
     const unsubs = PUBLIC_SLOTS.map(({ slotId }) => {
       const slotPath = `lobbySlots/${slotId}`;
       return onSnapshot(
@@ -173,19 +232,16 @@ export default function App() {
     return () => {
       unsubs.forEach((u) => u());
     };
-  }, [authLoading, currentUser]);
+  }, []);
 
   // 3. Sync activeMatchId with selectedSlotId when user selects a table
   useEffect(() => {
     const pointedMatchId = slotPointers[selectedSlotId];
-    if (pointedMatchId) {
-      setActiveMatchId(pointedMatchId);
-    }
+    setActiveMatchId(pointedMatchId || null);
   }, [selectedSlotId, slotPointers]);
 
   // 4. Listen to each table's active Match document so the Lobby table tabs show live player counts
   useEffect(() => {
-    if (authLoading || !currentUser) return;
     const matchIds = Array.from(new Set(Object.values(slotPointers).filter(Boolean)));
     if (matchIds.length === 0) return;
 
@@ -208,11 +264,11 @@ export default function App() {
     return () => {
       unsubs.forEach((u) => u());
     };
-  }, [authLoading, currentUser, slotPointers]);
+  }, [slotPointers]);
 
   // 5. Listen to the currently focused `activeMatchId` for live seat selection and gameplay sync
   useEffect(() => {
-    if (authLoading || !currentUser || !activeMatchId) {
+    if (!activeMatchId) {
       setOnlineMatch(null);
       return;
     }
@@ -228,9 +284,9 @@ export default function App() {
         const data = snap.data() as OnlineMatchDoc;
         setOnlineMatch(data);
 
-        // If the current user is Player 1 or Player 2 and the match transitions to 'playing', auto-open Stage!
+        // If the current player is Player 1 or Player 2 and the match transitions to 'playing', auto-open Stage!
         const isParticipant =
-          data.player1Id === currentUser.uid || data.player2Id === currentUser.uid;
+          data.player1Id === playerIdentity.uid || data.player2Id === playerIdentity.uid;
         if (isParticipant && (data.status === 'playing' || data.status === 'finished')) {
           setGameMode('ONLINE_FIREBASE');
           setView('STAGE');
@@ -238,10 +294,7 @@ export default function App() {
 
         // Trigger sound effects and delayed reveal animations on online state transitions
         const prev = prevOnlineRoundRef.current;
-        if (
-          prev.roundPhase !== data.roundPhase ||
-          prev.roundNumber !== data.roundNumber
-        ) {
+        if (prev.roundPhase !== data.roundPhase || prev.roundNumber !== data.roundNumber) {
           prevOnlineRoundRef.current = {
             roundNumber: data.roundNumber,
             roundPhase: data.roundPhase,
@@ -268,7 +321,6 @@ export default function App() {
               scheduleTimer(() => sound.playMatchVictory(), 1100);
             }
 
-            // Record in local session log
             setRoundHistory((prevLog) => {
               if (prevLog.some((r) => r.roundNumber === data.roundNumber)) return prevLog;
               const hIdx: 0 | 1 = data.hiderSlot === 1 ? 0 : 1;
@@ -296,43 +348,24 @@ export default function App() {
     );
 
     return () => unsub();
-  }, [authLoading, currentUser, activeMatchId, scheduleTimer]);
-
-  // Helper: Ensure user is signed in before performing an online Firebase lobby action
-  const ensureSignedInUser = async (): Promise<User | null> => {
-    if (currentUser) return currentUser;
-    try {
-      setLobbyError(null);
-      const cred = await signInWithGoogle();
-      return cred.user;
-    } catch (err) {
-      setLobbyError(
-        err instanceof Error ? err.message : 'Sign-in was cancelled or blocked by popup settings.'
-      );
-      return null;
-    }
-  };
+  }, [activeMatchId, playerIdentity.uid, scheduleTimer]);
 
   // Create a fresh waiting match document and point the current table slot to it
   const createFreshMatchForSlot = async (
-    user: User,
     slotId: string,
     initialSeat?: 1 | 2
   ): Promise<string> => {
     const newMatchId = generateUniqueMatchId(slotId);
     const matchPath = `matches/${newMatchId}`;
-    const nickname = sanitizePlayerName(
-      user.displayName || user.email?.split('@')[0],
-      'Player'
-    );
+    const nickname = sanitizePlayerName(playerIdentity.displayName, 'Player');
 
     const newMatchPayload = {
       matchId: newMatchId,
-      hostId: user.uid,
+      hostId: playerIdentity.uid,
       status: 'waiting' as const,
-      player1Id: initialSeat === 1 ? user.uid : '',
+      player1Id: initialSeat === 1 ? playerIdentity.uid : '',
       player1Name: initialSeat === 1 ? nickname : '',
-      player2Id: initialSeat === 2 ? user.uid : '',
+      player2Id: initialSeat === 2 ? playerIdentity.uid : '',
       player2Name: initialSeat === 2 ? nickname : '',
       score1: 0,
       score2: 0,
@@ -359,7 +392,7 @@ export default function App() {
         await setDoc(doc(db, 'lobbySlots', slotId), {
           slotId,
           activeMatchId: newMatchId,
-          updatedBy: user.uid,
+          updatedBy: playerIdentity.uid,
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
@@ -374,54 +407,46 @@ export default function App() {
   // Claim 1st Player or 2nd Player Seat in the Firebase Lobby
   const handlePickSeat = async (seat: 1 | 2) => {
     setLobbyError(null);
-    const user = await ensureSignedInUser();
-    if (!user) return;
-
     setBusyAction(`seat-${seat}`);
     try {
-      const nickname = sanitizePlayerName(
-        user.displayName || user.email?.split('@')[0],
-        'Player'
-      );
+      const nickname = sanitizePlayerName(playerIdentity.displayName, 'Player');
 
-      // If there is no active match on this table yet, or the match is already finished/playing with others, create a fresh waiting match with this seat claimed
       if (
         !onlineMatch ||
         onlineMatch.status === 'finished' ||
         (onlineMatch.status === 'playing' &&
-          onlineMatch.player1Id !== user.uid &&
-          onlineMatch.player2Id !== user.uid)
+          onlineMatch.player1Id !== playerIdentity.uid &&
+          onlineMatch.player2Id !== playerIdentity.uid)
       ) {
-        await createFreshMatchForSlot(user, selectedSlotId, seat);
+        await createFreshMatchForSlot(selectedSlotId, seat);
         sound.playCoinClink();
         return;
       }
 
-      // Otherwise update the existing waiting match to claim `seat` (and release the other seat if held by the same user)
       const matchPath = `matches/${onlineMatch.matchId}`;
       const nextP1Id =
         seat === 1
-          ? user.uid
-          : onlineMatch.player1Id === user.uid
+          ? playerIdentity.uid
+          : onlineMatch.player1Id === playerIdentity.uid
           ? ''
           : onlineMatch.player1Id;
       const nextP1Name =
         seat === 1
           ? nickname
-          : onlineMatch.player1Id === user.uid
+          : onlineMatch.player1Id === playerIdentity.uid
           ? ''
           : onlineMatch.player1Name;
 
       const nextP2Id =
         seat === 2
-          ? user.uid
-          : onlineMatch.player2Id === user.uid
+          ? playerIdentity.uid
+          : onlineMatch.player2Id === playerIdentity.uid
           ? ''
           : onlineMatch.player2Id;
       const nextP2Name =
         seat === 2
           ? nickname
-          : onlineMatch.player2Id === user.uid
+          : onlineMatch.player2Id === playerIdentity.uid
           ? ''
           : onlineMatch.player2Name;
 
@@ -444,12 +469,12 @@ export default function App() {
 
   // Leave claimed seat in the waiting lobby
   const handleLeaveSeat = async () => {
-    if (!currentUser || !onlineMatch || onlineMatch.status !== 'waiting') return;
+    if (!onlineMatch || onlineMatch.status !== 'waiting') return;
     setBusyAction('leave-seat');
     const matchPath = `matches/${onlineMatch.matchId}`;
     try {
-      const isP1 = onlineMatch.player1Id === currentUser.uid;
-      const isP2 = onlineMatch.player2Id === currentUser.uid;
+      const isP1 = onlineMatch.player1Id === playerIdentity.uid;
+      const isP2 = onlineMatch.player2Id === playerIdentity.uid;
       if (!isP1 && !isP2) return;
 
       await updateDoc(doc(db, 'matches', onlineMatch.matchId), {
@@ -469,11 +494,9 @@ export default function App() {
   // Create a fresh table lobby when requested
   const handleCreateFreshTableLobby = async () => {
     setLobbyError(null);
-    const user = await ensureSignedInUser();
-    if (!user) return;
     setBusyAction('create-fresh');
     try {
-      await createFreshMatchForSlot(user, selectedSlotId);
+      await createFreshMatchForSlot(selectedSlotId);
       setRoundHistory([]);
       sound.playBlanketClose();
     } finally {
@@ -484,8 +507,6 @@ export default function App() {
   // Join by custom Match ID code
   const handleJoinByMatchCode = async (rawCode: string) => {
     setLobbyError(null);
-    const user = await ensureSignedInUser();
-    if (!user) return;
     const cleanId = sanitizeMatchId(rawCode);
     const matchPath = `matches/${cleanId}`;
     setBusyAction('join-code');
@@ -505,7 +526,7 @@ export default function App() {
 
   // Start the online match once both 1st Player and 2nd Player seats are claimed
   const handleStartOnlineMatch = async () => {
-    if (!currentUser || !onlineMatch) return;
+    if (!onlineMatch) return;
     if (!onlineMatch.player1Id || !onlineMatch.player2Id) return;
     setBusyAction('start-match');
     const matchPath = `matches/${onlineMatch.matchId}`;
@@ -529,10 +550,7 @@ export default function App() {
   const handleStartSinglePlayer = () => {
     clearAllTimers();
     setGameMode('VS_CPU');
-    const myName = sanitizePlayerName(
-      currentUser?.displayName || currentUser?.email?.split('@')[0],
-      'Player 1'
-    );
+    const myName = sanitizePlayerName(playerIdentity.displayName, 'Player 1');
     setPlayerNames([myName, 'Parlor Bot']);
     setScores([0, 0]);
     setRoundNumber(1);
@@ -568,7 +586,7 @@ export default function App() {
   // Online Firebase Gameplay Actions:
   // 1. Online Hider locks coin under Hat 0, 1, or 2 and opens the blanket
   const handleOnlineHideCoinAndOpenBlanket = async (hatIdx: number) => {
-    if (!currentUser || !onlineMatch || onlineMatch.status !== 'playing') return;
+    if (!onlineMatch || onlineMatch.status !== 'playing') return;
     const matchPath = `matches/${onlineMatch.matchId}`;
     try {
       await updateDoc(doc(db, 'matches', onlineMatch.matchId), {
@@ -583,13 +601,13 @@ export default function App() {
 
   // 2. Online Seeker guesses Hat 0, 1, or 2
   const handleOnlineSeekerGuess = async (chosenHatIdx: number) => {
-    if (!currentUser || !onlineMatch || onlineMatch.status !== 'playing') return;
+    if (!onlineMatch || onlineMatch.status !== 'playing') return;
     if (onlineMatch.roundPhase !== 'GUESSING') return;
 
     const seekerSlot: 1 | 2 = onlineMatch.hiderSlot === 1 ? 2 : 1;
     const isMyGuessTurn =
-      (seekerSlot === 1 && onlineMatch.player1Id === currentUser.uid) ||
-      (seekerSlot === 2 && onlineMatch.player2Id === currentUser.uid);
+      (seekerSlot === 1 && onlineMatch.player1Id === playerIdentity.uid) ||
+      (seekerSlot === 2 && onlineMatch.player2Id === playerIdentity.uid);
     if (!isMyGuessTurn) return;
 
     const foundCoin = chosenHatIdx === onlineMatch.coinHat;
@@ -617,7 +635,7 @@ export default function App() {
 
   // 3. Online Next Round (Swap Hider & Seeker Roles)
   const handleOnlineNextRound = async () => {
-    if (!currentUser || !onlineMatch || onlineMatch.status !== 'playing') return;
+    if (!onlineMatch || onlineMatch.status !== 'playing') return;
     if (onlineMatch.roundPhase !== 'REVEAL') return;
 
     const nextHiderSlot: 1 | 2 = onlineMatch.hiderSlot === 1 ? 2 : 1;
@@ -779,15 +797,13 @@ export default function App() {
   // Determine effective phase on Stage
   const isOnlineMyTurnToHide =
     isOnlineStage &&
-    currentUser !== null &&
-    ((onlineMatch.hiderSlot === 1 && onlineMatch.player1Id === currentUser.uid) ||
-      (onlineMatch.hiderSlot === 2 && onlineMatch.player2Id === currentUser.uid));
+    ((onlineMatch.hiderSlot === 1 && onlineMatch.player1Id === playerIdentity.uid) ||
+      (onlineMatch.hiderSlot === 2 && onlineMatch.player2Id === playerIdentity.uid));
 
   const isOnlineMyTurnToGuess =
     isOnlineStage &&
-    currentUser !== null &&
-    ((onlineMatch.hiderSlot === 1 && onlineMatch.player2Id === currentUser.uid) ||
-      (onlineMatch.hiderSlot === 2 && onlineMatch.player1Id === currentUser.uid));
+    ((onlineMatch.hiderSlot === 1 && onlineMatch.player2Id === playerIdentity.uid) ||
+      (onlineMatch.hiderSlot === 2 && onlineMatch.player1Id === playerIdentity.uid));
 
   let effectivePhase: RoundPhase = phase;
   if (isOnlineStage) {
@@ -1027,28 +1043,19 @@ export default function App() {
         {/* VIEW 1: FIREBASE REAL-PLAYER MATCH LOBBY */}
         {view === 'LOBBY' ? (
           <MatchLobby
-            currentUser={
-              currentUser
-                ? {
-                    uid: currentUser.uid,
-                    displayName: currentUser.displayName,
-                    email: currentUser.email,
-                  }
-                : null
-            }
-            authLoading={authLoading}
+            playerIdentity={playerIdentity}
             selectedSlotId={selectedSlotId}
             tableSummaries={tableSummaries}
             currentMatch={onlineMatch}
             busyAction={busyAction}
             errorMessage={lobbyError}
-            onSignIn={ async () => {
-              await ensureSignedInUser();
-            }}
+            unauthorizedDomainHost={unauthorizedDomainHost}
+            onUpdatePlayerName={handleUpdatePlayerName}
+            onSignIn={handleGoogleSignIn}
             onSignOut={async () => {
               await logOutUser();
-              setOnlineMatch(null);
             }}
+            onDismissDomainNotice={() => setUnauthorizedDomainHost(null)}
             onSelectTableSlot={(slotId) => {
               setSelectedSlotId(slotId);
               setLobbyError(null);
@@ -1062,7 +1069,7 @@ export default function App() {
             onStartLocalPassAndPlay={handleStartLocalPassAndPlay}
           />
         ) : (
-          /* VIEW 2: ACTIVE GAME STAGE (Supports Live Online Firebase, 1 Player vs Bot, and 2P Local) */
+          /* VIEW 2: ACTIVE GAME STAGE */
           <>
             {/* Top Scoreboard & Mode Switcher Strip */}
             <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
@@ -1083,7 +1090,10 @@ export default function App() {
                         type="text"
                         value={playerNames[0]}
                         onChange={(e) =>
-                          setPlayerNames([sanitizePlayerName(e.target.value, 'Player 1'), playerNames[1]])
+                          setPlayerNames([
+                            sanitizePlayerName(e.target.value, 'Player 1'),
+                            playerNames[1],
+                          ])
                         }
                         onBlur={() => setEditingNames(false)}
                         onKeyDown={(e) => e.key === 'Enter' && setEditingNames(false)}
@@ -1344,7 +1354,7 @@ export default function App() {
                 <div className="absolute bottom-0 inset-x-0 h-3 bg-gradient-to-r from-amber-600 via-yellow-300 to-amber-500 opacity-80" />
               </div>
 
-              {/* OPAQUE BLANKET OVERLAY (When opponent is hiding the coin behind the closed blanket) */}
+              {/* OPAQUE BLANKET OVERLAY */}
               {isOpaqueBlanket && (
                 <div className="absolute inset-0 z-25 flex flex-col items-center justify-center p-6 text-center">
                   <div className="max-w-lg w-full rounded-2xl bg-[#1A080C]/95 border border-amber-400/40 p-8 shadow-2xl">

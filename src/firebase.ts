@@ -7,6 +7,7 @@ const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
 
 // Validate connection to Firestore on boot
 async function testConnection() {
@@ -38,7 +39,7 @@ export interface FirestoreErrorInfo {
     email?: string | null;
     emailVerified?: boolean | null;
     isAnonymous?: boolean | null;
-    tenantId?: string | null;
+    tenantId?: boolean | string | null;
     providerInfo?: {
       providerId?: string | null;
       email?: string | null;
@@ -88,6 +89,68 @@ export function sanitizePlayerName(raw: string | null | undefined, fallback = 'P
 export function sanitizeMatchId(raw: string): string {
   const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, MAX_MATCH_ID_LENGTH);
   return cleaned.length > 0 ? cleaned : 'room-default';
+}
+
+export interface PlayerIdentity {
+  uid: string;
+  displayName: string;
+  email: string | null;
+  isGoogleAuth: boolean;
+}
+
+const LOCAL_UID_KEY = 'three_hats_player_uid';
+const LOCAL_NAME_KEY = 'three_hats_player_name';
+
+export function getOrCreateLocalPlayerIdentity(): PlayerIdentity {
+  let uid = '';
+  let name = '';
+  try {
+    uid = window.localStorage.getItem(LOCAL_UID_KEY) || '';
+    name = window.localStorage.getItem(LOCAL_NAME_KEY) || '';
+  } catch {
+    // Fallback if storage is restricted
+  }
+
+  if (!uid || !ID_PATTERN.test(uid)) {
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    let rand = '';
+    for (let i = 0; i < 10; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    uid = `player_${rand}`;
+    try {
+      window.localStorage.setItem(LOCAL_UID_KEY, uid);
+    } catch {
+      // Ignore storage write error
+    }
+  }
+
+  if (!name) {
+    const badgeNum = Math.floor(100 + Math.random() * 900);
+    name = `Player ${badgeNum}`;
+    try {
+      window.localStorage.setItem(LOCAL_NAME_KEY, name);
+    } catch {
+      // Ignore
+    }
+  }
+
+  return {
+    uid,
+    displayName: sanitizePlayerName(name, 'Player'),
+    email: null,
+    isGoogleAuth: false,
+  };
+}
+
+export function saveLocalPlayerName(newName: string): string {
+  const clean = sanitizePlayerName(newName, 'Player');
+  try {
+    window.localStorage.setItem(LOCAL_NAME_KEY, clean);
+  } catch {
+    // Ignore
+  }
+  return clean;
 }
 
 export async function signInWithGoogle() {

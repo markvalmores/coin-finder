@@ -12,8 +12,11 @@ import {
   RefreshCw,
   ArrowRight,
   ShieldCheck,
+  Edit3,
+  ExternalLink,
 } from 'lucide-react';
 import { GoldCoinIllustration } from './StageArtwork';
+import { FIREBASE_PROJECT_ID, PlayerIdentity } from '../firebase';
 
 export interface OnlineMatchDoc {
   matchId: string;
@@ -44,19 +47,17 @@ export interface TableSlotSummary {
 }
 
 interface MatchLobbyProps {
-  currentUser: {
-    uid: string;
-    displayName: string | null;
-    email: string | null;
-  } | null;
-  authLoading: boolean;
+  playerIdentity: PlayerIdentity;
   selectedSlotId: string;
   tableSummaries: TableSlotSummary[];
   currentMatch: OnlineMatchDoc | null;
   busyAction: string | null;
   errorMessage: string | null;
+  unauthorizedDomainHost: string | null;
+  onUpdatePlayerName: (newName: string) => void;
   onSignIn: () => Promise<void>;
   onSignOut: () => Promise<void>;
+  onDismissDomainNotice: () => void;
   onSelectTableSlot: (slotId: string) => void;
   onJoinByMatchCode: (code: string) => Promise<void>;
   onPickSeat: (seat: 1 | 2) => Promise<void>;
@@ -68,15 +69,17 @@ interface MatchLobbyProps {
 }
 
 export const MatchLobby: React.FC<MatchLobbyProps> = ({
-  currentUser,
-  authLoading,
+  playerIdentity,
   selectedSlotId,
   tableSummaries,
   currentMatch,
   busyAction,
   errorMessage,
+  unauthorizedDomainHost,
+  onUpdatePlayerName,
   onSignIn,
   onSignOut,
+  onDismissDomainNotice,
   onSelectTableSlot,
   onJoinByMatchCode,
   onPickSeat,
@@ -88,9 +91,12 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
 }) => {
   const [customCodeInput, setCustomCodeInput] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+  const [editingNickname, setEditingNickname] = useState(false);
+  const [nameInput, setNameInput] = useState(playerIdentity.displayName);
 
-  const isPlayer1Me = Boolean(currentUser && currentMatch?.player1Id === currentUser.uid);
-  const isPlayer2Me = Boolean(currentUser && currentMatch?.player2Id === currentUser.uid);
+  const isPlayer1Me = Boolean(currentMatch?.player1Id === playerIdentity.uid);
+  const isPlayer2Me = Boolean(currentMatch?.player2Id === playerIdentity.uid);
   const isPlayer1Taken = Boolean(currentMatch && currentMatch.player1Id !== '');
   const isPlayer2Taken = Boolean(currentMatch && currentMatch.player2Id !== '');
   const bothSeatsFilled = isPlayer1Taken && isPlayer2Taken;
@@ -103,9 +109,25 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
     window.setTimeout(() => setCopiedCode(false), 2000);
   };
 
+  const handleCopyDomain = () => {
+    if (!unauthorizedDomainHost) return;
+    navigator.clipboard.writeText(unauthorizedDomainHost).catch(() => {});
+    setCopiedDomain(true);
+    window.setTimeout(() => setCopiedDomain(false), 2000);
+  };
+
+  const commitNameChange = () => {
+    setEditingNickname(false);
+    if (nameInput.trim()) {
+      onUpdatePlayerName(nameInput.trim());
+    } else {
+      setNameInput(playerIdentity.displayName);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6">
-      {/* Top Lobby Header Banner & Auth Bar */}
+      {/* Top Lobby Header Banner & Player Identity Bar */}
       <section className="rounded-2xl bg-[#131E18] border border-white/10 p-6 sm:p-8 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
         <div className="max-w-2xl">
           <div className="flex items-center gap-2 text-xs text-amber-300 font-mono uppercase tracking-wider mb-2">
@@ -126,23 +148,46 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
           </p>
         </div>
 
-        {/* Player Identity / Auth Controls */}
+        {/* Player Identity / Nickname & Optional Google Sign-In Controls */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0">
-          {authLoading ? (
-            <div className="px-4 py-2.5 rounded-xl bg-black/30 border border-white/10 text-xs text-stone-400">
-              Checking account...
-            </div>
-          ) : currentUser ? (
-            <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-[#0B120E] border border-white/10">
-              <div className="text-left">
-                <div className="text-xs text-stone-400 flex items-center gap-1">
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Signed in for Live Matchmaking</span>
-                </div>
-                <div className="text-sm font-bold text-amber-200 truncate max-w-[180px]">
-                  {currentUser.displayName || currentUser.email || 'Parlor Player'}
-                </div>
+          <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-[#0B120E] border border-white/10">
+            <div className="text-left">
+              <div className="text-xs text-stone-400 flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span>
+                  {playerIdentity.isGoogleAuth
+                    ? 'Google Account Connected'
+                    : 'Parlor Player Pass Ready'}
+                </span>
               </div>
+              {editingNickname ? (
+                <input
+                  type="text"
+                  value={nameInput}
+                  maxLength={60}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  onBlur={commitNameChange}
+                  onKeyDown={(e) => e.key === 'Enter' && commitNameChange()}
+                  className="mt-0.5 bg-black/50 border border-amber-400/60 rounded px-2 py-0.5 text-sm font-bold text-amber-200 w-40 focus:outline-none"
+                  autoFocus
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNameInput(playerIdentity.displayName);
+                    setEditingNickname(true);
+                  }}
+                  title="Click to change your display name"
+                  className="mt-0.5 inline-flex items-center gap-1.5 text-sm font-bold text-amber-200 hover:text-amber-100 cursor-pointer"
+                >
+                  <span className="truncate max-w-[160px]">{playerIdentity.displayName}</span>
+                  <Edit3 className="w-3.5 h-3.5 text-stone-400" />
+                </button>
+              )}
+            </div>
+
+            {playerIdentity.isGoogleAuth ? (
               <button
                 type="button"
                 onClick={onSignOut}
@@ -153,19 +198,74 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
                   <span>Sign Out</span>
                 </span>
               </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={onSignIn}
-              className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-stone-950 font-bold text-sm transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <LogIn className="w-4 h-4" />
-              <span>Sign In with Google for Online Lobby</span>
-            </button>
-          )}
+            ) : (
+              <button
+                type="button"
+                onClick={onSignIn}
+                className="ml-2 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-xs font-semibold text-amber-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Google Sign-In</span>
+                </span>
+              </button>
+            )}
+          </div>
         </div>
       </section>
+
+      {/* Helpful banner if Google Popup returned auth/unauthorized-domain on Vercel */}
+      {unauthorizedDomainHost && (
+        <section className="rounded-xl bg-[#1A140B] border border-amber-400/40 p-4 text-xs sm:text-sm text-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="font-bold text-amber-300">
+              Instant Matchmaking Active for {playerIdentity.displayName} (No Google Popup Required!)
+            </div>
+            <p className="text-stone-300 leading-relaxed">
+              You can immediately click <strong>Pick 1st Player</strong> or{' '}
+              <strong>Pick 2nd Player</strong> below using your Parlor Player Pass. To also enable
+              Google Popup Sign-In on <code className="font-mono text-amber-200">{unauthorizedDomainHost}</code>,
+              add that domain in Firebase Console &rarr; Authentication &rarr; Settings &rarr;
+              Authorized domains.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleCopyDomain}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-xs font-mono text-amber-200 cursor-pointer whitespace-nowrap"
+            >
+              {copiedDomain ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Copied Domain</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy {unauthorizedDomainHost}</span>
+                </>
+              )}
+            </button>
+            <a
+              href={`https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-stone-950 font-bold text-xs whitespace-nowrap"
+            >
+              <span>Firebase Auth Settings</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+            <button
+              type="button"
+              onClick={onDismissDomainNotice}
+              className="px-2.5 py-2 text-xs text-stone-400 hover:text-white cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        </section>
+      )}
 
       {errorMessage && (
         <div className="rounded-xl bg-rose-950/80 border border-rose-400/40 px-4 py-3 text-sm text-rose-200 flex items-center justify-between gap-4">
@@ -184,8 +284,7 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
             {tableSummaries.map((table) => {
               const isSelected = selectedSlotId === table.slotId;
               const m = table.match;
-              const count =
-                (m?.player1Id ? 1 : 0) + (m?.player2Id ? 1 : 0);
+              const count = (m?.player1Id ? 1 : 0) + (m?.player2Id ? 1 : 0);
               const statusLabel =
                 m?.status === 'playing'
                   ? 'In Match'
@@ -285,9 +384,7 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
                 <span className="text-xs font-mono text-stone-400">Hides Coin 1st</span>
               </div>
 
-              <h2 className="font-display text-2xl font-bold text-white mb-2">
-                1st Player
-              </h2>
+              <h2 className="font-display text-2xl font-bold text-white mb-2">1st Player</h2>
               <p className="text-xs sm:text-sm text-stone-300 leading-relaxed mb-5">
                 Start Round 1 behind the closed velvet blanket and hide the gold coin under one of
                 the 3 hats first.
@@ -353,9 +450,7 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
 
               <div className="flex items-center gap-3 mb-2">
                 <GoldCoinIllustration size={42} glowing />
-                <h2 className="font-display text-2xl font-bold text-amber-100">
-                  1 Player Only
-                </h2>
+                <h2 className="font-display text-2xl font-bold text-amber-100">1 Player Only</h2>
               </div>
 
               <p className="text-xs sm:text-sm text-stone-300 leading-relaxed mb-5">
@@ -408,9 +503,7 @@ export const MatchLobby: React.FC<MatchLobbyProps> = ({
                 <span className="text-xs font-mono text-stone-400">Guesses Hat 1st</span>
               </div>
 
-              <h2 className="font-display text-2xl font-bold text-white mb-2">
-                2nd Player
-              </h2>
+              <h2 className="font-display text-2xl font-bold text-white mb-2">2nd Player</h2>
               <p className="text-xs sm:text-sm text-stone-300 leading-relaxed mb-5">
                 Guess where 1st Player hid the coin when the blanket opens in Round 1, then hide the
                 coin yourself in Round 2!
