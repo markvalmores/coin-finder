@@ -1,0 +1,219 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default-Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+    function isValidLobbySlot(data) {
+      return data.keys().hasAll(['slotId', 'activeMatchId', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['slotId', 'activeMatchId', 'updatedBy', 'updatedAt'])
+        && data.slotId is string && data.slotId.size() >= 1 && data.slotId.size() <= 32 && data.slotId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.activeMatchId is string && data.activeMatchId.size() >= 1 && data.activeMatchId.size() <= 64 && data.activeMatchId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 && data.updatedBy.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    function isValidMatch(data) {
+      return data.keys().hasAll([
+          'matchId', 'hostId', 'status',
+          'player1Id', 'player1Name', 'player2Id', 'player2Name',
+          'score1', 'score2', 'roundNumber', 'hiderSlot', 'roundPhase',
+          'coinHat', 'guessedHat', 'lastRoundWinnerSlot', 'winnerSlot',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'matchId', 'hostId', 'status',
+          'player1Id', 'player1Name', 'player2Id', 'player2Name',
+          'score1', 'score2', 'roundNumber', 'hiderSlot', 'roundPhase',
+          'coinHat', 'guessedHat', 'lastRoundWinnerSlot', 'winnerSlot',
+          'createdAt', 'updatedAt'
+        ])
+        && data.matchId is string && data.matchId.size() >= 1 && data.matchId.size() <= 64 && data.matchId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.hostId is string && data.hostId.size() >= 1 && data.hostId.size() <= 128 && data.hostId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.status is string && data.status.size() >= 1 && data.status.size() <= 16
+        && (data.status == 'waiting' || data.status == 'playing' || data.status == 'finished')
+        && data.player1Id is string && data.player1Id.size() <= 128
+        && data.player1Name is string && data.player1Name.size() <= 60
+        && data.player2Id is string && data.player2Id.size() <= 128
+        && data.player2Name is string && data.player2Name.size() <= 60
+        && data.score1 is int && data.score1 >= 0 && data.score1 <= 5
+        && data.score2 is int && data.score2 >= 0 && data.score2 <= 5
+        && data.roundNumber is int && data.roundNumber >= 1 && data.roundNumber <= 50
+        && data.hiderSlot is int && (data.hiderSlot == 1 || data.hiderSlot == 2)
+        && data.roundPhase is string && data.roundPhase.size() >= 1 && data.roundPhase.size() <= 20
+        && (data.roundPhase == 'HIDING' || data.roundPhase == 'GUESSING' || data.roundPhase == 'REVEAL' || data.roundPhase == 'MATCH_OVER')
+        && data.coinHat is int && data.coinHat >= -1 && data.coinHat <= 2
+        && data.guessedHat is int && data.guessedHat >= -1 && data.guessedHat <= 2
+        && data.lastRoundWinnerSlot is int && data.lastRoundWinnerSlot >= 0 && data.lastRoundWinnerSlot <= 2
+        && data.winnerSlot is int && data.winnerSlot >= 0 && data.winnerSlot <= 2
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    // 4. Match Action Helpers
+    function isValidSeatChange() {
+      return (
+        incoming().player1Id == existing().player1Id
+        || (existing().player1Id == '' && incoming().player1Id == request.auth.uid)
+        || (existing().player1Id == request.auth.uid && incoming().player1Id == '')
+      ) && (
+        incoming().player2Id == existing().player2Id
+        || (existing().player2Id == '' && incoming().player2Id == request.auth.uid)
+        || (existing().player2Id == request.auth.uid && incoming().player2Id == '')
+      ) && (
+        !(incoming().player1Id == request.auth.uid && incoming().player2Id == request.auth.uid)
+      );
+    }
+
+    function isSeatSelectionAction() {
+      return existing().status == 'waiting'
+        && incoming().status == 'waiting'
+        && isValidSeatChange()
+        && incoming().diff(existing()).affectedKeys().hasOnly(['player1Id', 'player1Name', 'player2Id', 'player2Name', 'updatedAt']);
+    }
+
+    function isStartMatchAction() {
+      return existing().status == 'waiting'
+        && incoming().status == 'playing'
+        && (request.auth.uid == existing().player1Id || request.auth.uid == existing().player2Id)
+        && existing().player1Id != ''
+        && existing().player2Id != ''
+        && incoming().roundPhase == 'HIDING'
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'roundPhase', 'updatedAt']);
+    }
+
+    function isHideCoinAction() {
+      return existing().status == 'playing'
+        && incoming().status == 'playing'
+        && existing().roundPhase == 'HIDING'
+        && incoming().roundPhase == 'GUESSING'
+        && (
+          (existing().hiderSlot == 1 && request.auth.uid == existing().player1Id)
+          || (existing().hiderSlot == 2 && request.auth.uid == existing().player2Id)
+        )
+        && incoming().coinHat >= 0 && incoming().coinHat <= 2
+        && incoming().diff(existing()).affectedKeys().hasOnly(['coinHat', 'roundPhase', 'updatedAt']);
+    }
+
+    function isGuessHatAction() {
+      return existing().status == 'playing'
+        && (incoming().status == 'playing' || incoming().status == 'finished')
+        && existing().roundPhase == 'GUESSING'
+        && (incoming().roundPhase == 'REVEAL' || incoming().roundPhase == 'MATCH_OVER')
+        && (
+          (existing().hiderSlot == 1 && request.auth.uid == existing().player2Id)
+          || (existing().hiderSlot == 2 && request.auth.uid == existing().player1Id)
+        )
+        && incoming().guessedHat >= 0 && incoming().guessedHat <= 2
+        && (incoming().score1 + incoming().score2) == (existing().score1 + existing().score2 + 1)
+        && (incoming().status != 'finished' || incoming().score1 == 5 || incoming().score2 == 5)
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'guessedHat', 'score1', 'score2', 'lastRoundWinnerSlot', 'winnerSlot', 'roundPhase', 'status', 'updatedAt'
+        ]);
+    }
+
+    function isNextRoundAction() {
+      return existing().status == 'playing'
+        && incoming().status == 'playing'
+        && existing().roundPhase == 'REVEAL'
+        && incoming().roundPhase == 'HIDING'
+        && (request.auth.uid == existing().player1Id || request.auth.uid == existing().player2Id)
+        && incoming().roundNumber == existing().roundNumber + 1
+        && incoming().hiderSlot != existing().hiderSlot
+        && incoming().coinHat == -1
+        && incoming().guessedHat == -1
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'roundNumber', 'hiderSlot', 'roundPhase', 'coinHat', 'guessedHat', 'updatedAt'
+        ]);
+    }
+
+    // 5. Public Lobby Slot Pointers (/lobbySlots/{slotId})
+    match /lobbySlots/{slotId} {
+      allow get: if isSignedIn() && isValidId(slotId);
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && isValidId(slotId)
+        && isValidLobbySlot(incoming())
+        && incoming().slotId == slotId
+        && (slotId == 'slot-1' || slotId == 'slot-2' || slotId == 'slot-3' || slotId == 'slot-4')
+        && exists(/databases/$(database)/documents/matches/$(incoming().activeMatchId));
+
+      allow update: if isSignedIn()
+        && isValidId(slotId)
+        && isValidLobbySlot(incoming())
+        && incoming().slotId == existing().slotId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['activeMatchId', 'updatedBy', 'updatedAt'])
+        && exists(/databases/$(database)/documents/matches/$(incoming().activeMatchId));
+
+      allow delete: if false;
+    }
+
+    // 6. Real-Time Match Documents (/matches/{matchId})
+    match /matches/{matchId} {
+      allow get: if isSignedIn() && isValidId(matchId);
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && isValidId(matchId)
+        && isValidMatch(incoming())
+        && incoming().matchId == matchId
+        && incoming().hostId == request.auth.uid
+        && incoming().status == 'waiting'
+        && incoming().score1 == 0
+        && incoming().score2 == 0
+        && incoming().roundNumber == 1
+        && incoming().hiderSlot == 1
+        && incoming().roundPhase == 'HIDING'
+        && incoming().coinHat == -1
+        && incoming().guessedHat == -1
+        && incoming().lastRoundWinnerSlot == 0
+        && incoming().winnerSlot == 0
+        && incoming().createdAt == request.time
+        && (
+          (incoming().player1Id == request.auth.uid && incoming().player2Id == '')
+          || (incoming().player1Id == '' && incoming().player2Id == request.auth.uid)
+          || (incoming().player1Id == '' && incoming().player2Id == '')
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(matchId)
+        && isValidMatch(incoming())
+        && existing().status != 'finished'
+        && incoming().matchId == existing().matchId
+        && incoming().hostId == existing().hostId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isSeatSelectionAction()
+          || isStartMatchAction()
+          || isHideCoinAction()
+          || isGuessHatAction()
+          || isNextRoundAction()
+        );
+
+      allow delete: if false;
+    }
+  }
+}

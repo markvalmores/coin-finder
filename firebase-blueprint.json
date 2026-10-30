@@ -1,0 +1,173 @@
+{
+  "entities": {
+    "LobbySlot": {
+      "title": "LobbySlot",
+      "description": "Points a public parlor table slot to the currently active Match document ID for real-time player matchmaking.",
+      "type": "object",
+      "properties": {
+        "slotId": {
+          "type": "string",
+          "description": "Identifier of the parlor table slot (e.g., slot-1, slot-2, slot-3, slot-4).",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "activeMatchId": {
+          "type": "string",
+          "description": "Document ID of the current active match in the matches collection.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the authenticated user who last updated this table pointer.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the pointer update."
+        }
+      },
+      "required": ["slotId", "activeMatchId", "updatedBy", "updatedAt"]
+    },
+    "Match": {
+      "title": "Match",
+      "description": "Real-time two-player match lobby and game state for Three Hats & A Coin.",
+      "type": "object",
+      "properties": {
+        "matchId": {
+          "type": "string",
+          "description": "Unique match identifier.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostId": {
+          "type": "string",
+          "description": "UID of the player who created the match lobby.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "description": "Lifecycle status of the match. Terminal when finished.",
+          "enum": ["waiting", "playing", "finished"],
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "player1Id": {
+          "type": "string",
+          "description": "UID of the player who picked 1st Player (or empty string if unclaimed).",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "player1Name": {
+          "type": "string",
+          "description": "Display nickname of 1st Player (or empty string if unclaimed).",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "player2Id": {
+          "type": "string",
+          "description": "UID of the player who picked 2nd Player (or empty string if unclaimed).",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "player2Name": {
+          "type": "string",
+          "description": "Display nickname of 2nd Player (or empty string if unclaimed).",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "score1": {
+          "type": "number",
+          "description": "Current score of 1st Player (0 to 5)."
+        },
+        "score2": {
+          "type": "number",
+          "description": "Current score of 2nd Player (0 to 5)."
+        },
+        "roundNumber": {
+          "type": "number",
+          "description": "Current 1-indexed round number."
+        },
+        "hiderSlot": {
+          "type": "number",
+          "description": "Which player is hiding the coin behind the blanket this round (1 or 2)."
+        },
+        "roundPhase": {
+          "type": "string",
+          "description": "Current phase of the round.",
+          "enum": ["HIDING", "GUESSING", "REVEAL", "MATCH_OVER"],
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "coinHat": {
+          "type": "number",
+          "description": "Hat index where the coin is hidden (-1 while unchosen, 0, 1, or 2)."
+        },
+        "guessedHat": {
+          "type": "number",
+          "description": "Hat index guessed by the Seeker (-1 while unchosen, 0, 1, or 2)."
+        },
+        "lastRoundWinnerSlot": {
+          "type": "number",
+          "description": "Player slot (0, 1, or 2) that won the most recent point."
+        },
+        "winnerSlot": {
+          "type": "number",
+          "description": "Player slot (0, 1, or 2) that reached 5 points and won the match."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "matchId",
+        "hostId",
+        "status",
+        "player1Id",
+        "player1Name",
+        "player2Id",
+        "player2Name",
+        "score1",
+        "score2",
+        "roundNumber",
+        "hiderSlot",
+        "roundPhase",
+        "coinHat",
+        "guessedHat",
+        "lastRoundWinnerSlot",
+        "winnerSlot",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/lobbySlots/{slotId}": {
+      "schema": {
+        "$ref": "#/entities/LobbySlot"
+      },
+      "description": "Public parlor table pointers to active match IDs."
+    },
+    "/matches/{matchId}": {
+      "schema": {
+        "$ref": "#/entities/Match"
+      },
+      "description": "Real-time multiplayer match lobby and round state documents."
+    }
+  }
+}
