@@ -1,0 +1,6 @@
+{
+  "name": "Three Hats & A Coin",
+  "description": "A two-player turn-based parlor bluffing game where players take turns closing the velvet blanket to hide a gold coin under one of three hats while the other player guesses to reach 5 points first.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

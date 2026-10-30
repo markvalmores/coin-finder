@@ -1,0 +1,61 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #0E1713;
+    color: #F4F1EA;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Tactile Emerald Felt Table Surface */
+.felt-table-surface {
+  background-color: #0C3B26;
+  background-image:
+    radial-gradient(ellipse at 50% 35%, rgba(26, 117, 75, 0.45) 0%, rgba(11, 56, 36, 0.85) 65%, rgba(6, 31, 19, 0.98) 100%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.012) 0px, rgba(255, 255, 255, 0.012) 2px, transparent 2px, transparent 4px);
+}
+
+/* Heavy Crimson Velvet Stage Blanket Curtain */
+.velvet-blanket-surface {
+  background-color: #5C0F1B;
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(122, 22, 38, 0.92) 0px,
+      rgba(153, 27, 46, 0.95) 28px,
+      rgba(92, 15, 27, 0.98) 56px,
+      rgba(66, 9, 18, 0.99) 84px,
+      rgba(122, 22, 38, 0.92) 112px
+    ),
+    radial-gradient(circle at 50% 25%, rgba(251, 191, 36, 0.14), transparent 70%);
+}
+
+/* Subtle Backstage Cutaway Blanket Pattern when Hider is peeking behind closed blanket */
+.velvet-blanket-backstage {
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(92, 15, 27, 0.35) 0px,
+      rgba(122, 22, 38, 0.20) 32px,
+      rgba(66, 9, 18, 0.42) 64px
+    );
+}
+
